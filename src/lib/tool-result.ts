@@ -1,7 +1,8 @@
 import { z } from "zod";
+import { getChatGptToolProfile } from "./tool-profile.js";
 
 /**
- * Chuẩn output JSON cho mọi tool — ChatGPT dễ parse.
+ * Shared output envelope for every MCP tool.
  *
  * Schema:
  * { ok, tool, summary, data }
@@ -42,7 +43,10 @@ export function toolResult<T extends object>(
   };
 
   return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    content: [{
+      type: "text",
+      text: getChatGptToolProfile() === "slim" ? payload.summary : JSON.stringify(payload, null, 2),
+    }],
     structuredContent: payload,
   };
 }

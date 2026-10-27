@@ -382,6 +382,14 @@ This server grants **full access to your machine** — files, shell, git. Only e
 
 See also [AGENTS.md](AGENTS.md) for agent onboarding and `apply_patch` format.
 
+## Chat-only performance harness (experimental)
+
+The ChatGPT Local Coder MCP server works with ordinary ChatGPT Chat. It does not start a second model, use ChatGPT Work, or bypass ChatGPT usage limits. ChatGPT retains control of reasoning and tool selection.
+
+- Ordinary `grep` calls prefer `ripgrep` if it is installed and available on `PATH`, with the existing Node.js scanner as a fallback for missing binaries and complex search modes. Override the executable with `LOCAL_CODER_RG_BIN` when necessary.
+- The default `CHATGPT_TOOL_PROFILE=slim` returns concise text and the complete MCP `structuredContent`. The `full` profile keeps the legacy JSON text representation for other clients.
+- Measure search performance locally after `npm run build` with `node scripts/bench-search.mjs`. The script creates and deletes its own temporary fixture. Its numbers measure local search and response sizes only, not end-to-end ChatGPT inference or network latency.
+
 ## 📚 References
 
 - [Model Context Protocol](https://modelcontextprotocol.io)
