@@ -265,7 +265,7 @@ export function getCheckpointConfig(): Record<string, unknown> {
 export async function checkpointBefore(
   tool: string,
   paths: string[],
-  options?: { summary?: string; dry_run?: boolean }
+  options?: { summary?: string; dry_run?: boolean; require_complete?: boolean }
 ): Promise<string | null> {
   if (!isEnabled() || options?.dry_run) return null;
 
@@ -274,7 +274,11 @@ export async function checkpointBefore(
 
   const snapshots: CheckpointFileSnapshot[] = [];
   for (const filePath of uniquePaths) {
-    snapshots.push(await snapshotFile(filePath));
+    const snapshot = await snapshotFile(filePath);
+    if (options?.require_complete && snapshot.skipped) {
+      throw new Error(`Cannot edit without restorable checkpoint: ${filePath} (${snapshot.skip_reason || "snapshot unavailable"})`);
+    }
+    snapshots.push(snapshot);
   }
 
   const id = `cp_${randomUUID().replace(/-/g, "").slice(0, 12)}`;

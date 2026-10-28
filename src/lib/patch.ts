@@ -19,6 +19,8 @@ function detectEol(text: string): "\r\n" | "\n" {
 
 interface ParsedHunk {
   oldStart?: number;
+  oldCount?: number;
+  newCount?: number;
   lines: Array<{ type: "context" | "remove" | "add"; text: string }>;
 }
 
@@ -42,6 +44,8 @@ function parsePatch(patchText: string): ParsedHunk[] {
     const headerMatch = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@/);
     const hunk: ParsedHunk = {
       oldStart: headerMatch ? Number(headerMatch[1]) : undefined,
+      oldCount: headerMatch ? Number(headerMatch[2] ?? "1") : undefined,
+      newCount: headerMatch ? Number(headerMatch[4] ?? "1") : undefined,
       lines: [],
     };
     i++;
@@ -112,14 +116,27 @@ function applyHunkAtIndex(output: string[], hunk: ParsedHunk, index: number): vo
   output.splice(index, removeCount, ...replacement);
 }
 
-function applyHunkWithLineNumber(output: string[], hunk: ParsedHunk, delta: number): number {
+function applyHunkWithLineNumber(output: string[], hunk: ParsedHunk, delta: number, strictNumbered = false): number {
   if (hunk.oldStart === undefined) {
     throw new Error("Missing line number in hunk header");
   }
 
-  const targetIndex = hunk.oldStart - 1 + delta;
   const removeCount = hunk.lines.filter((l) => l.type === "context" || l.type === "remove").length;
   const replacement = hunkReplacement(hunk);
+  // In unified diffs, a zero-length old range is anchored AFTER oldStart.
+  // Thus -0,0 inserts at the beginning, and -N,0 inserts after line N.
+  const targetIndex = hunk.oldStart - (hunk.oldCount === 0 ? 0 : 1) + delta;
+  if (strictNumbered) {
+    if (hunk.oldCount !== removeCount || hunk.newCount !== replacement.length) {
+      throw new Error(`Numbered patch hunk count mismatch at source line ${hunk.oldStart}`);
+    }
+    const expected = hunkSearchPattern(hunk);
+    const insertionLimit = output.length - (output[output.length - 1] === "" ? 1 : 0);
+    if (targetIndex < 0 || targetIndex > (removeCount === 0 ? insertionLimit : output.length) ||
+      expected.some((line, index) => output[targetIndex + index] !== line)) {
+      throw new Error(`Numbered patch context mismatch at source line ${hunk.oldStart}`);
+    }
+  }
   output.splice(targetIndex, removeCount, ...replacement);
   return replacement.length - removeCount;
 }
@@ -136,7 +153,7 @@ function applyHunkWithContextSearch(output: string[], hunk: ParsedHunk, searchFr
   return index + hunkReplacement(hunk).length;
 }
 
-export function applyUnifiedPatchToText(original: string, patchText: string): string {
+export function applyUnifiedPatchToText(original: string, patchText: string, options?: { strictNumbered?: boolean }): string {
   const eol = detectEol(original);
   const normalizedOriginal = normalizeEol(original);
   const output = normalizedOriginal.split("\n");
@@ -147,7 +164,7 @@ export function applyUnifiedPatchToText(original: string, patchText: string): st
 
   for (const hunk of hunks) {
     if (hunk.oldStart !== undefined) {
-      delta += applyHunkWithLineNumber(output, hunk, delta);
+      delta += applyHunkWithLineNumber(output, hunk, delta, options?.strictNumbered === true);
     } else {
       searchFrom = applyHunkWithContextSearch(output, hunk, searchFrom);
     }

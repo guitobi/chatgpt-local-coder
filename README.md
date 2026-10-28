@@ -206,6 +206,7 @@ Free sessions expire after **60 minutes** and the URL changes each time, so you 
 |------|-------------|
 | `agent_status` | Permissions, workspace roots, audit log |
 | `project_context` | Reads AGENTS.md, README, CLAUDE.md, configs |
+| `task_context` | Ranks likely implementation files and tests for a natural-language task, returns bounded excerpts and scoped instructions |
 
 ### Filesystem
 
@@ -234,6 +235,31 @@ Free sessions expire after **60 minutes** and the URL changes each time, so you 
 | `shell_status` / `shell_reset` | Persistent shell session |
 | `start_process` | Long-running / background commands |
 | `process_status` / `process_output` / `stop_process` | Manage background jobs |
+
+### Chat-native harness (slim and full)
+
+| Tool | Description |
+|------|-------------|
+| `inspect_code` | Read-only regex search plus up to five bounded source excerpts and concise Git status in one MCP call |
+| `task_context` | Read-only task-aware source/test discovery; uses ripgrep ignore rules, bounded output, and no external model |
+| `diagnose_failure` | Execute an explicit command, then return bounded stdout/stderr tails, file:line error locations and Git status |
+| `edit_and_verify` | Apply a single-file patch with a rewind checkpoint, then run one explicitly provided test/build command; returns bounded diagnostics |
+
+These tools use the current ChatGPT conversation for reasoning. They do not call a second model, Codex app-server, ChatGPT Work or an external AI API. `inspect_code` and `task_context` are read-only; `diagnose_failure` and `edit_and_verify` run real commands that **can change files**. `task_context` ranks lexical matches, not semantic meaning; always read the full files before editing. `edit_and_verify` supports a single-file patch only (not `*** Begin Patch` multi-file blocks), and `dry_run:true` does not run the command. Failed tests leave the edited file and checkpoint in place; no automatic retry or rollback occurs. Full logs remain available via `run_command`.
+
+Single-file patches reject symlink files and symlink parent directories, verify file identity and original content before writing through an open handle, and preserve checkpoints. This lowers path-swap risk but does not make concurrent filesystem operations universally atomic. Task-aware context reads bounded source/instruction files and redacts common credential and private-key patterns; the filter is heuristic, not a general-purpose secrets scanner.
+
+For `edit_and_verify`, checkpoint snapshots must be complete: if the file exceeds the configured snapshot size limit, the tool rejects the edit before writing it. Configured post-edit hooks still execute; their failures are reported separately and affect the combined result.
+
+Run `npm run test:harness:http` for an authenticated end-to-end Streamable HTTP test. It launches a separate localhost-only server with a synthetic temporary project, randomized ports/token and no upstream MCP dependencies; the active plugin and tunnel are untouched. Run `npm run bench:harness` to compare separate `apply_patch` + `diagnose_failure` calls with a single `edit_and_verify` call. The benchmark reports local HTTP p50/p95, result bytes and tool-call counts; it **does not measure ChatGPT UI, reasoning or public tunnel latency**.
+
+Run `npm run bench:task-context` to inspect source/test ranking and warm local p50/p95 for three repeatable code tasks without invoking a model. It reports only relative filenames and response sizes; it does not establish that a model reasons better.
+
+For a separate Linux container smoke test, start a disposable server with a writable synthetic `/workspace` and a loopback-only port, set `MCP_TEST_URL` to its authenticated MCP endpoint, then run `npm run test:harness:container`. The script checks that the endpoint is loopback-only and that the server reports `/workspace` before writing the fixture. The current shell runner requires `bash`, and read-only containers must set `MCP_SHELL_STATE_DIR` to a writable directory.
+
+`project_context` also supports conditional fetches for repeated Chat sessions: call it normally, retain the returned `revision`, and later pass `if_revision: "<revision>"` with the same options. If the source files are unchanged, it returns `unchanged: true` and `files: []` while preserving `count`. It hashes full file contents, including bytes beyond a truncated preview. This reduces repeated response size; it does not cache or skip filesystem reads.
+
+For related multi-file changes, `apply_patch` accepts opt-in `safe:true` alongside an existing base-directory `path` and a `*** Begin Patch` block. Safe mode validates all patches and targets before any write, forbids path traversal and symlink targets, requires a complete rewind checkpoint, then applies the batch. `dry_run:true` validates without writing. If a filesystem write fails, the tool attempts to restore already changed files and reports rollback status; multi-file filesystem updates cannot be guaranteed atomic against concurrent processes. Post-edit hook failures remain visible. The default `apply_patch` behavior is unchanged.
 
 ### Git
 
@@ -387,7 +413,7 @@ See also [AGENTS.md](AGENTS.md) for agent onboarding and `apply_patch` format.
 The ChatGPT Local Coder MCP server works with ordinary ChatGPT Chat. It does not start a second model, use ChatGPT Work, or bypass ChatGPT usage limits. ChatGPT retains control of reasoning and tool selection.
 
 - Ordinary `grep` calls prefer `ripgrep` if it is installed and available on `PATH`, with the existing Node.js scanner as a fallback for missing binaries and complex search modes. Override the executable with `LOCAL_CODER_RG_BIN` when necessary.
-- The default `CHATGPT_TOOL_PROFILE=slim` returns concise text and the complete MCP `structuredContent`. The `full` profile keeps the legacy JSON text representation for other clients.
+- The default `CHATGPT_TOOL_PROFILE=focused` exposes the essential ChatGPT coding tools with concise text and complete MCP `structuredContent`. Select `slim` to restore the previous 30-tool catalog or `full` for every tool and legacy JSON text representation.
 - Measure search performance locally after `npm run build` with `node scripts/bench-search.mjs`. The script creates and deletes its own temporary fixture. Its numbers measure local search and response sizes only, not end-to-end ChatGPT inference or network latency.
 
 ## 📚 References

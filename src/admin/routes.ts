@@ -20,6 +20,7 @@ import {
   subscribeActivity,
   type ActivityEntry,
 } from "../lib/activity-log.js";
+import { getToolMetricsSnapshot } from "../lib/tool-metrics.js";
 
 function parseDotEnv(text: string): Record<string, string> {
   const out: Record<string, string> = {};
@@ -87,6 +88,15 @@ export function createAdminRouter(manager: McpUpstreamManager, options: {
       checkpoint: getCheckpointConfig(),
       instructions: options.instructionSummary?.() ?? null,
     });
+  });
+
+  // In-memory aggregates only; adminAuth and localhostOnly guard this router.
+  router.get("/api/tool-metrics", (_req: Request, res: Response) => {
+    if (!process.env.ADMIN_TOKEN?.trim()) {
+      res.status(503).json({ enabled: false, error: "ADMIN_TOKEN required for tool metrics" });
+      return;
+    }
+    res.json(getToolMetricsSnapshot());
   });
 
   router.get("/api/instructions/preview", (_req, res) => {

@@ -22,6 +22,26 @@ export interface CodexHook {
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const STATE_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../profiles/codex-hooks.json");
+const MAX_HOOK_OUTPUT_CHARS = 64 * 1024;
+
+function terminateHookTree(child: ReturnType<typeof spawn>): void {
+  if (!child.pid) {
+    child.kill("SIGKILL");
+    return;
+  }
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+      windowsHide: true, stdio: "ignore",
+    });
+    killer.on("error", () => child.kill("SIGKILL"));
+    killer.on("close", (code) => {
+      if (code !== 0) child.kill("SIGKILL");
+    });
+  } else {
+    try { process.kill(-child.pid, "SIGKILL"); }
+    catch { child.kill("SIGKILL"); }
+  }
+}
 const EVENT_MAP: Record<string, HookEvent | undefined> = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
@@ -139,22 +159,27 @@ function execute(command: string, timeoutMs: number, input?: string): Promise<st
   return new Promise((resolve) => {
     const child = spawn(shell, args, {
       windowsHide: true,
+      detached: process.platform !== "win32",
       env: { ...process.env, PLUGIN_DATA: CODEX_HOME },
     });
     let stdout = "";
+    let timedOut = false;
     const timer = setTimeout(() => {
-      child.kill();
-      resolve("");
+      timedOut = true;
+      terminateHookTree(child);
     }, timeoutMs);
-    child.stdout.on("data", (data: Buffer) => (stdout += data.toString()));
+    child.stdout.on("data", (data: Buffer) => {
+      stdout = (stdout + data.toString()).slice(-MAX_HOOK_OUTPUT_CHARS);
+    });
     child.on("close", () => {
       clearTimeout(timer);
-      resolve(stdout.trim());
+      resolve(timedOut ? "" : stdout.trim());
     });
     child.on("error", () => {
       clearTimeout(timer);
       resolve("");
     });
+    child.stderr?.resume();
     child.stdin.end(input);
   });
 }

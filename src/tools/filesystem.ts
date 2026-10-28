@@ -5,7 +5,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { validatePath } from "../lib/path-security.js";
 import { audit } from "../lib/audit.js";
 import { requireWriteAllowed } from "../lib/permissions.js";
-import { applyMultiFilePatch, applyUnifiedPatchToText, buildSimpleDiff, isMultiFilePatch, parseMultiFilePatch } from "../lib/patch.js";
+import { applyMultiFilePatch, buildSimpleDiff, isMultiFilePatch, parseMultiFilePatch } from "../lib/patch.js";
+import { applySingleFilePatch } from "../lib/single-file-patch.js";
+import { applySafeMultiFilePatch } from "../lib/safe-multi-file-patch.js";
 import { checkpointBefore } from "../lib/checkpoint.js";
 import { toolAnnotations } from "../lib/tool-annotations.js";
 import { enrichAfterEdit } from "../lib/edit-enrichment.js";
@@ -296,14 +298,36 @@ export function registerFilesystemTools(server: McpServer): void {
         path: z.string().optional().describe("Target file (single-file) or base directory (multi-file)"),
         patch: z.string(),
         dry_run: z.boolean().optional().default(false),
+        safe: z.boolean().optional().default(false).describe("Opt-in strict preflight, complete checkpoint and best-effort rollback for multi-file patches"),
       },
 
       annotations: toolAnnotations("edit"),
     },
-    async ({ path: filePath, patch, dry_run }) => {
+    async ({ path: filePath, patch, dry_run, safe }) => {
       requireWriteAllowed();
 
       if (isMultiFilePatch(patch)) {
+        if (safe) {
+          if (!filePath) throw new Error("Safe multi-file patch requires a base directory path");
+          const baseDir = await validatePath(filePath);
+          if (!(await fs.stat(baseDir)).isDirectory()) throw new Error("Safe patch path must be a directory");
+          let result;
+          try {
+            result = await applySafeMultiFilePatch(patch, { baseDir, dryRun: dry_run });
+          } catch (error) {
+            await audit({ tool: "apply_patch", action: "safe-patch", target: baseDir, status: "error", details: { phase: "preflight-or-checkpoint" } });
+            throw error;
+          }
+          await audit({
+            tool: "apply_patch", action: "safe-patch", target: baseDir,
+            status: result.ok ? (dry_run ? "dry-run" : "ok") : "error",
+            details: { files: result.files.length, checkpoint_id: result.checkpoint_id, rollback: result.rollback },
+          });
+          return toolResult("apply_patch", result, {
+            ok: result.ok,
+            summary: result.error ? `safe patch failed: ${result.error}` : `safe patch ${dry_run ? "previewed" : "applied"} ${result.files.length} file(s)${result.hooks.failed ? `; ${result.hooks.failed} hook(s) failed` : ""}`,
+          });
+        }
         let baseDir: string | undefined;
         if (filePath) {
           const validPath = await validatePath(filePath);
@@ -333,15 +357,9 @@ export function registerFilesystemTools(server: McpServer): void {
         });
       }
 
+      if (safe) throw new Error("safe:true is only available for multi-file patches");
       if (!filePath) throw new Error("path is required for single-file patches");
-      const validPath = await validatePath(filePath);
-      const original = await fs.readFile(validPath, "utf-8");
-      const next = applyUnifiedPatchToText(original, patch);
-      const diff = buildSimpleDiff(original, next);
-      const checkpointId = await checkpointBefore("apply_patch", [validPath], { dry_run });
-      if (!dry_run) await fs.writeFile(validPath, next, "utf-8");
-      await audit({ tool: "apply_patch", action: "patch", target: validPath, status: dry_run ? "dry-run" : "ok" });
-      const data = await enrichAfterEdit({ path: validPath, diff, dry_run, checkpoint_id: checkpointId }, [validPath], dry_run);
+      const data = await applySingleFilePatch({ path: filePath, patch, dryRun: dry_run });
       return toolResult("apply_patch", data);
     }
   );
@@ -396,7 +414,7 @@ export function registerFilesystemTools(server: McpServer): void {
     "grep",
     {
       title: "Grep",
-      description: "Explore: search file contents by regex. Prefer over reading many files blindly. Modes: content, files_with_matches, count.",
+      description: "Explore: search file contents by regex, respecting .gitignore and hiding sensitive files/lines by default. Explicit respect_ignore:false opts into legacy broad search. Modes: content, files_with_matches, count.",
       inputSchema: {
         pattern: z.string(),
         path: z.string().optional(),
@@ -408,6 +426,7 @@ export function registerFilesystemTools(server: McpServer): void {
         context_before: z.number().int().nonnegative().max(20).optional().default(0),
         context_after: z.number().int().nonnegative().max(20).optional().default(0),
         context_around: z.number().int().nonnegative().max(20).optional().default(0),
+        respect_ignore: z.boolean().optional().default(true).describe("Default true: enforce .gitignore and omit sensitive matches. Set false only to explicitly search ignored files."),
       },
 
       annotations: toolAnnotations("read"),
@@ -423,6 +442,7 @@ export function registerFilesystemTools(server: McpServer): void {
       context_before,
       context_after,
       context_around,
+      respect_ignore,
     }) => {
       const validPath = searchPath ? await validatePath(searchPath) : (await import("../lib/path-security.js")).getAllowedRoots()[0];
       const output = await grepSearch({
@@ -436,6 +456,7 @@ export function registerFilesystemTools(server: McpServer): void {
         contextBefore: context_before,
         contextAfter: context_after,
         contextAround: context_around,
+        respectIgnore: respect_ignore,
       });
       await audit({ tool: "grep", action: "grep", target: validPath, status: "ok", details: { pattern, output_mode } });
       return toolResult("grep", { path: validPath, pattern, output_mode, output });

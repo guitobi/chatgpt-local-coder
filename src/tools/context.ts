@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { validatePath } from "../lib/path-security.js";
@@ -14,6 +15,7 @@ import { appendAutoMemory } from "../lib/auto-memory.js";
 import { loadPathRulesForFile } from "../lib/path-rules.js";
 import { toolResult } from "../lib/tool-result.js";
 import { loadProjectSkill, loadProjectSkills } from "../lib/skills-loader.js";
+import { buildTaskContext } from "../lib/task-context.js";
 
 
 
@@ -109,26 +111,58 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
         path: z.string().optional().describe("Project directory, defaults to primary workspace"),
         max_depth: z.number().int().min(0).max(5).optional().default(3),
         max_bytes_per_file: z.number().int().positive().max(200000).optional().default(60000),
+        if_revision: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("Previous revision; omit unchanged file contents"),
       },
 
       annotations: toolAnnotations("read"),
     },
-    async ({ path: projectPath, max_depth, max_bytes_per_file }) => {
+    async ({ path: projectPath, max_depth, max_bytes_per_file, if_revision }) => {
       const root = projectPath ? await validatePath(projectPath) : workspaceRoot;
-      const files = await findContextFiles(root, max_depth);
+      const files = (await findContextFiles(root, max_depth)).sort();
       const fileContents: Array<{ path: string; content: string; truncated: boolean }> = [];
+      const digest = createHash("sha256").update("project_context:v1\0")
+        .update(root).update("\0")
+        .update(String(max_depth)).update("\0")
+        .update(String(max_bytes_per_file)).update("\0");
 
       for (const file of files) {
         try {
           const buf = await fs.readFile(file);
+          digest.update(file).update("\0").update(String(buf.length)).update("\0").update(buf);
           const truncated = buf.length > max_bytes_per_file;
           const text = buf.subarray(0, max_bytes_per_file).toString("utf-8");
           fileContents.push({ path: file, content: text, truncated });
         } catch {}
       }
 
-      await audit({ tool: "project_context", action: "read", target: root, status: "ok", details: { files: files.length } });
-      return toolResult("project_context", { root, files: fileContents, count: fileContents.length });
+      const revision = digest.digest("hex");
+      const unchanged = if_revision !== undefined && if_revision === revision;
+      await audit({ tool: "project_context", action: "read", target: root, status: "ok", details: { files: fileContents.length, unchanged } });
+      return toolResult("project_context", {
+        root, files: unchanged ? [] : fileContents, count: fileContents.length, revision, unchanged,
+      });
+    }
+  );
+
+  server.registerTool(
+    "task_context",
+    {
+      title: "Task-Aware Code Context",
+      description:
+        "For an unfamiliar code task, find likely implementation files, related tests, task-matching source excerpts and scoped AGENTS.md/CLAUDE.md in one read-only call. Honors ignore rules and limits output. Inspect full files before editing.",
+      inputSchema: {
+        task: z.string().trim().min(1).max(2000).describe("Plain-language task or exact code symbol to locate"),
+        path: z.string().optional().describe("Project directory, defaults to primary workspace"),
+        max_files: z.number().int().min(1).max(8).optional().default(6),
+        max_chars: z.number().int().min(1024).max(20000).optional().default(9000),
+      },
+      annotations: toolAnnotations("read"),
+    },
+    async ({ task, path: projectPath, max_files, max_chars }) => {
+      const root = projectPath ? await validatePath(projectPath) : workspaceRoot;
+      const result = await buildTaskContext({ root, task, maxFiles: max_files, maxChars: max_chars });
+      await audit({ tool: "task_context", action: "read", target: root, status: "ok", details: { files: result.files.length, warnings: result.warnings.length } });
+      return toolResult("task_context", result, { summary: `${result.files.length} relevant files, ${result.instructions.length} instruction files${result.warnings.length ? `, ${result.warnings.length} warnings` : ""}` });
     }
   );
 
@@ -164,7 +198,7 @@ export function registerContextTools(server: McpServer, workspaceRoot: string): 
           servers: upstream,
         },
         admin_ui: `http://127.0.0.1:${process.env.ADMIN_PORT || "3001"}/ui`,
-        tool_profile: process.env.CHATGPT_TOOL_PROFILE || "slim",
+        tool_profile: process.env.CHATGPT_TOOL_PROFILE || "focused",
       });
     }
   );

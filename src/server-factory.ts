@@ -8,10 +8,12 @@ import { registerRewindTools } from "./tools/rewind.js";
 import { registerMcpBridgeTools } from "./tools/mcp-bridge.js";
 import { registerNodeReplTool } from "./tools/node-repl.js";
 import { registerPonytailTurnTool } from "./tools/ponytail.js";
+import { registerHarnessTools } from "./tools/harness.js";
 import { buildServerInstructions } from "./lib/quickstart.js";
 import type { McpUpstreamManager } from "./lib/mcp-upstream-manager.js";
 import { getChatGptToolProfile, shouldExposeTool } from "./lib/tool-profile.js";
 import { TOOL_RESULT_OUTPUT_SCHEMA } from "./lib/tool-result.js";
+import { isToolMetricsEnabled, recordToolMetric } from "./lib/tool-metrics.js";
 
 const NOOP_TOOL = {
   remove: () => {},
@@ -44,7 +46,22 @@ function configureToolRegistration(server: McpServer): void {
         ? { ...config, outputSchema: TOOL_RESULT_OUTPUT_SCHEMA }
         : config;
 
-    return original(name, nextConfig as any, callback as any);
+    if (!isToolMetricsEnabled()) {
+      return original(name, nextConfig as any, callback as any);
+    }
+
+    const measuredCallback = async (...args: unknown[]) => {
+      const started = performance.now();
+      try {
+        const result = await (callback as (...values: unknown[]) => unknown)(...args);
+        recordToolMetric(toolName, performance.now() - started, result);
+        return result;
+      } catch (error) {
+        recordToolMetric(toolName, performance.now() - started, undefined, true);
+        throw error;
+      }
+    };
+    return original(name, nextConfig as any, measuredCallback as any);
   }) as typeof server.registerTool;
 }
 
@@ -79,6 +96,7 @@ export function createMcpServer(
 
   registerFilesystemTools(server);
   registerShellTools(server, workspaceRoot, shellTimeout);
+  registerHarnessTools(server, workspaceRoot, shellTimeout);
   registerGitTools(server, workspaceRoot);
   registerContextTools(server, workspaceRoot);
   registerNodeReplTool(server, workspaceRoot);

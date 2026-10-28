@@ -18,6 +18,36 @@ let sessionInitializedAt: string | null = null;
 let persistenceRoot: string | null = null;
 const history: string[] = [];
 const MAX_HISTORY = 50;
+const MAX_CAPTURE_CHARS = 256 * 1024;
+
+function appendLogTail(previous: string, chunk: Buffer): string {
+  const combined = previous + chunk.toString("utf8");
+  return combined.length > MAX_CAPTURE_CHARS ? combined.slice(-MAX_CAPTURE_CHARS) : combined;
+}
+
+function terminateCommandTree(pid: number | undefined, child: ReturnType<typeof spawn>): void {
+  if (!pid) {
+    child.kill("SIGKILL");
+    return;
+  }
+  if (process.platform === "win32") {
+    // Node's child.kill() kills only the PowerShell wrapper, not its descendants.
+    const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true, stdio: "ignore",
+    });
+    killer.on("error", () => child.kill("SIGKILL"));
+    killer.on("close", code => {
+      if (code !== 0) child.kill("SIGKILL");
+    });
+  } else {
+    // Detached child owns a fresh process group; signal the entire group.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }
+}
 
 export function setShellPersistenceRoot(workspaceRoot: string): void {
   persistenceRoot = path.resolve(workspaceRoot);
@@ -205,6 +235,7 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
     const child = spawn(shell, args, {
       cwd,
       windowsHide: true,
+      detached: process.platform !== "win32",
       env: {
         ...process.env,
         CI: "true",
@@ -225,15 +256,21 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill();
+      terminateCommandTree(child.pid, child);
     }, timeoutMs);
 
-    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.stdout?.on("data", (d: Buffer) => { stdout = appendLogTail(stdout, d); });
+    child.stderr?.on("data", (d: Buffer) => { stderr = appendLogTail(stderr, d); });
     child.on("close", (code) => {
       clearTimeout(timer);
       if (timedOut) {
-        reject(new Error(`Command timed out after ${timeoutMs / 1000}s`));
+        // Preserve partial diagnostics for callers such as diagnose_failure.
+        // Keep the existing rejection contract for run_command.
+        reject(Object.assign(new Error(`Command timed out after ${timeoutMs / 1000}s`), {
+          timed_out: true,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        }));
         return;
       }
       resolve({
@@ -248,6 +285,59 @@ function runOnce(command: string, cwd: string, timeoutMs: number): Promise<Shell
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(err);
+    });
+  });
+}
+
+/** Explicit, shell-free argv execution. Does not reinterpret or persist shell state. */
+export function execArgvInDirectory(argv: string[], cwd: string, timeoutMs: number): Promise<ShellExecResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      shell: false,
+      env: {
+        ...process.env,
+        CI: "true",
+        PAGER: "cat",
+        GIT_PAGER: "cat",
+        NO_COLOR: "1",
+        npm_config_yes: "true",
+      },
+    });
+    child.stdin?.end();
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateCommandTree(child.pid, child);
+    }, timeoutMs);
+    child.stdout?.on("data", (d: Buffer) => { stdout = appendLogTail(stdout, d); });
+    child.stderr?.on("data", (d: Buffer) => { stderr = appendLogTail(stderr, d); });
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(Object.assign(new Error(`Command timed out after ${timeoutMs / 1000}s`), {
+          timed_out: true,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+        }));
+        return;
+      }
+      resolve({
+        command: JSON.stringify(argv),
+        cwd,
+        stdout: stdout.trim(),
+        stderr: stderr.trim(),
+        exit_code: code,
+        timed_out: false,
+      });
     });
   });
 }

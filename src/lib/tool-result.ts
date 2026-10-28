@@ -45,7 +45,7 @@ export function toolResult<T extends object>(
   return {
     content: [{
       type: "text",
-      text: getChatGptToolProfile() === "slim" ? payload.summary : JSON.stringify(payload, null, 2),
+      text: getChatGptToolProfile() !== "full" ? payload.summary : JSON.stringify(payload, null, 2),
     }],
     structuredContent: payload,
   };

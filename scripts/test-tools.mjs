@@ -78,7 +78,7 @@ await run("grep falls back when ripgrep is unavailable or regex is unsupported",
   const previous = process.env.LOCAL_CODER_RG_BIN;
   process.env.LOCAL_CODER_RG_BIN = "missing-ripgrep-executable-for-test";
   try {
-    const out = await grepSearch({ pattern: "needle", path: file });
+    const out = await grepSearch({ pattern: "needle", path: file, respectIgnore: false });
     if (out !== `${file}:1: alpha needle`) throw new Error(`missing binary: ${out}`);
   } finally {
     if (previous === undefined) delete process.env.LOCAL_CODER_RG_BIN;
@@ -118,6 +118,56 @@ await run("grep preserves directory exclusions, line counts and case folding", a
   await fs.writeFile(upper, "extensionCaseMarker\n", "utf8");
   const extensionCase = await grepSearch({ pattern: "extensionCaseMarker", path: root, glob: "*.ts" });
   if (extensionCase !== `${upper}:1: extensionCaseMarker`) throw new Error(`case-insensitive glob: ${extensionCase}`);
+});
+
+await run("grep is ignore-aware by default across modes and supports explicit opt-out", async () => {
+  const repo = path.join(tmpDir, "safe-search-repo");
+  const owner = path.join(repo, "src", "owner.ts");
+  await fs.mkdir(path.dirname(owner), { recursive: true });
+  await fs.mkdir(path.join(repo, "ignored"), { recursive: true });
+  await fs.mkdir(path.join(repo, "node_modules"), { recursive: true });
+  await fs.writeFile(path.join(repo, ".gitignore"), "ignored/\n");
+  await fs.writeFile(owner, "before\nfindLedgerOwner visible\nafter\n");
+  await fs.writeFile(path.join(repo, "ignored", "decoy.ts"), "findLedgerOwner IGNORED_CONTENT_MARKER\n");
+  await fs.writeFile(path.join(repo, ".env"), "API_KEY=findLedgerOwner_ENV_MARKER\n");
+  await fs.writeFile(path.join(repo, "credentials.ts"), "findLedgerOwner CREDENTIAL_MARKER\n");
+  await fs.writeFile(path.join(repo, "node_modules", "cache.ts"), "findLedgerOwner GENERATED_MARKER\n");
+  await fs.writeFile(path.join(repo, "src", "inline-secret.ts"),
+    "const API_KEY = 'PRIVATE_FIXTURE_MARKER'; // findLedgerOwner\n");
+  const args = { pattern: "findLedgerOwner", path: repo, glob: "*.ts" };
+  for (const outputMode of ["content", "files_with_matches", "count"]) {
+    const output = await grepSearch({ ...args, outputMode });
+    if (!output.includes("owner.ts")) throw new Error("owner missing in " + outputMode + ": " + output);
+    if (/decoy|credentials|inline-secret|node_modules|IGNORED_CONTENT|PRIVATE_FIXTURE|CREDENTIAL_MARKER/.test(output)) {
+      throw new Error("unsafe output in " + outputMode + ": " + output);
+    }
+  }
+  const context = await grepSearch({ ...args, contextAround: 1 });
+  if (!context.includes("before") || !context.includes("after")) throw new Error("safe context missing: " + context);
+  if (/IGNORED_CONTENT|PRIVATE_FIXTURE|decoy|credentials/.test(context)) throw new Error("unsafe context: " + context);
+  const multi = await grepSearch({ pattern: "findLedgerOwner\\s+visible", path: repo, glob: "*.ts", multiline: true });
+  if (!multi.includes("owner.ts") || multi.includes("decoy")) throw new Error("unsafe multiline result: " + multi);
+  const legacy = await grepSearch({ ...args, outputMode: "files_with_matches", respectIgnore: false });
+  if (!legacy.includes("decoy.ts")) throw new Error("explicit ignore opt-out did not include the decoy: " + legacy);
+});
+
+await run("ignore-aware grep fails closed when ripgrep is missing", async () => {
+  const file = path.join(tmpDir, "grep-fail-closed.txt");
+  await fs.writeFile(file, "findLedgerOwner\n");
+  const before = process.env.LOCAL_CODER_RG_BIN;
+  process.env.LOCAL_CODER_RG_BIN = "missing-ripgrep-executable-for-test";
+  try {
+    let rejected = false;
+    try {
+      await grepSearch({ pattern: "findLedgerOwner", path: file });
+    } catch (error) {
+      rejected = /ripgrep|ignore/i.test(String(error));
+    }
+    if (!rejected) throw new Error("unsafe scanner fallback was allowed");
+  } finally {
+    if (before === undefined) delete process.env.LOCAL_CODER_RG_BIN;
+    else process.env.LOCAL_CODER_RG_BIN = before;
+  }
 });
 
 await run("apply_patch codex style", async () => {

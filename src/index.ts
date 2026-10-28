@@ -208,6 +208,18 @@ async function handleMcpPost(req: express.Request, res: express.Response): Promi
       return;
     }
 
+    // Tunnel discovery may probe before initialize. Do not return an MCP
+    // session ID for a non-initialize request: the next initialize would
+    // otherwise reuse an already initialized transport and fail HTTP 400.
+    if ((req.body as { method?: unknown } | null)?.method === "server/discover") {
+      res.status(200).json({
+        jsonrpc: "2.0",
+        error: { code: -32601, message: "Method not found" },
+        id: requestId,
+      });
+      return;
+    }
+
     // ChatGPT gui mot so request (vd "server/discover") KHONG kem Mcp-Session-Id.
     // Tra 400 o day khien connector retry vo han ("loading mai"). Thay vao do tao
     // session moi + warm-up roi phuc vu request, de SDK tra loi JSON-RPC hop le.

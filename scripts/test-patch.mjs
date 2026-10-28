@@ -37,5 +37,28 @@ test("crlf preserved", () => {
   if (!result.includes("c2\r\n")) throw new Error("crlf patch failed");
 });
 
+test("strict numbered zero-length insertion at start, middle and EOF", () => {
+  const cases = [
+    ["@@ -0,0 +1,1 @@\n+X", "X\nA\nB\n"],
+    ["@@ -1,0 +2,1 @@\n+X", "A\nX\nB\n"],
+    ["@@ -2,0 +3,1 @@\n+X", "A\nB\nX\n"],
+  ];
+  for (const [patch, expected] of cases) {
+    const actual = applyUnifiedPatchToText("A\nB\n", patch, { strictNumbered: true });
+    if (actual !== expected) throw new Error(`expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  }
+});
+
+test("strict numbered hunk rejects inconsistent original and new counts", () => {
+  const malformed = "@@ -1,2 +1,1 @@\n-A\n+X";
+  try {
+    applyUnifiedPatchToText("A\nB\n", malformed, { strictNumbered: true });
+    throw new Error("count mismatch was accepted");
+  } catch (error) {
+    if (error.message === "count mismatch was accepted") throw error;
+    if (!/count|hunk|mismatch/i.test(error.message)) throw error;
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

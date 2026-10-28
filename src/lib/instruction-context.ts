@@ -43,7 +43,7 @@ export async function buildInstructionContext(
 
   const blocks = [
     CODEX_AGENT_PROMPT,
-    `Tool profile: **${profile}** (${profile === "slim" ? "core tools only — optimal for ChatGPT web" : "all tools exposed"}).`,
+    `Tool profile: **${profile}** (${profile === "full" ? "all tools exposed" : profile === "focused" ? "curated coding tools only; use slim/full for specialized operations" : "core tools only; optimal for ChatGPT web"}).`,
     formatEnvironmentForInstructions({
       workspaceRoot: opts.workspaceRoot,
       workspaceRoots: opts.workspaceRoots,

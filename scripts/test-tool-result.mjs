@@ -16,11 +16,16 @@ try {
   assert.match(failed.content[0].text, /Permission denied/);
   assert.deepEqual(failed.structuredContent.data, { error: "Permission denied", path: "protected.ts" });
 
+  process.env.CHATGPT_TOOL_PROFILE = "focused";
+  const focused = toolResult("read_text_file", payload, { summary: "read completed" });
+  assert.equal(focused.content[0].text, "read completed", "focused must not duplicate the structured payload as JSON text");
+  assert.deepEqual(focused.structuredContent, chat.structuredContent);
+
   process.env.CHATGPT_TOOL_PROFILE = "full";
   const generic = toolResult("read_text_file", payload, { summary: "read completed" });
   assert.deepEqual(JSON.parse(generic.content[0].text), generic.structuredContent);
   assert.deepEqual(generic.structuredContent, chat.structuredContent);
-  console.log("tool-result: 3 passed, 0 failed");
+  console.log("tool-result: 4 passed, 0 failed");
 } finally {
   if (savedProfile === undefined) delete process.env.CHATGPT_TOOL_PROFILE;
   else process.env.CHATGPT_TOOL_PROFILE = savedProfile;
